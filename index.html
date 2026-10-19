@@ -61,7 +61,8 @@ footer{background:transparent;padding:8px 10px calc(env(safe-area-inset-bottom,0
     <div id="prev"></div>
     <label class="chk" id="chkw"><input type="checkbox" id="orig"> Sertakan teks asli di bawah terjemahan</label>
     <label class="chk"><input type="checkbox" id="autop" checked> Tempel otomatis saat kembali ke aplikasi</label>
-    <div class="note2">Salin balasan pelanggan di WhatsApp, lalu kembali ke sini: isinya ditempel &amp; diterjemahkan otomatis.</div>
+    <label class="chk"><input type="checkbox" id="follow" checked> Ikuti bahasa pelanggan (balasan saya otomatis dalam bahasanya)</label>
+    <div class="note2">Salin balasan pelanggan di WhatsApp, lalu kembali ke sini: isinya otomatis dideteksi bahasanya &amp; diterjemahkan ke bahasa Anda.</div>
     <textarea id="txt" rows="3" dir="auto" placeholder="Ketik pesan..."></textarea>
     <div class="btns">
       <button type="button" class="go" id="go">Send WA</button>
@@ -84,14 +85,38 @@ function langName(c){for(var i=0;i<LANGS.length;i++)if(LANGS[i][0]===c)return LA
 
 /* ---------- terjemahan (MyMemory, gratis tanpa API key) ---------- */
 function decode(s){var t=document.createElement("textarea");t.innerHTML=s;return t.value}
-function pieces(line){
-  var parts=line.match(/[^.!?。！？]+[.!?。！？]*\s*/g)||[line],out=[],cur="";
-  parts.forEach(function(p){
-    while(p.length>450){if(cur){out.push(cur);cur=""}out.push(p.slice(0,450));p=p.slice(450)}
-    if((cur+p).length>450){out.push(cur);cur=p}else cur+=p;
-  });
+var MAXB=400; /* batas MyMemory 500 BYTE per permintaan */
+function blen(x){return new TextEncoder().encode(x).length}
+function sentences(line){
+  var out=[],cur="",i,c,n;
+  for(i=0;i<line.length;i++){
+    c=line.charAt(i);cur+=c;
+    if(".!?。！？".indexOf(c)>-1){
+      n=line.charAt(i+1);
+      if("。！？".indexOf(c)>-1||n===""||/\s/.test(n)){
+        while(i+1<line.length&&/[.!?。！？"'”’)\]]/.test(line.charAt(i+1))){cur+=line.charAt(++i)}
+        while(i+1<line.length&&/\s/.test(line.charAt(i+1))){cur+=line.charAt(++i)}
+        out.push(cur);cur="";
+      }
+    }
+  }
   if(cur)out.push(cur);
   return out;
+}
+function cutBytes(p){
+  var ch=Array.from(p),b=0,i=0,sp=-1;
+  for(;i<ch.length;i++){var l=blen(ch[i]);if(b+l>MAXB)break;b+=l;if(/\s/.test(ch[i]))sp=i}
+  if(i<ch.length&&sp>0)i=sp+1;
+  return [ch.slice(0,i).join(""),ch.slice(i).join("")];
+}
+function pieces(line){
+  var out=[],cur="";
+  sentences(line).forEach(function(p){
+    while(blen(p)>MAXB){var c=cutBytes(p);if(cur){out.push(cur);cur=""}out.push(c[0]);p=c[1]}
+    if(blen(cur+p)>MAXB){if(cur)out.push(cur);cur=p}else cur+=p;
+  });
+  if(cur)out.push(cur);
+  return out.filter(function(x){return x.trim()});
 }
 async function trPiece(q,from,to){
   var u="https://api.mymemory.translated.net/get?q="+encodeURIComponent(q)+"&langpair="+encodeURIComponent(from+"|"+to)+(MYMEMORY_EMAIL?"&de="+encodeURIComponent(MYMEMORY_EMAIL):"");
@@ -104,19 +129,27 @@ async function trPiece(q,from,to){
   }
   return decode(t);
 }
-async function tr(text,from,to){
-  if(from===to)return text;
-  var key=from+"|"+to+"|"+text;
-  if(cache[key])return cache[key];
-  var lines=text.split("\n"),out=[];
+async function trRaw(text,from,to){
+  var lines=text.split("\n"),out=[],sep=(to==="ja"||to==="zh-CN")?"":" ";
   for(var i=0;i<lines.length;i++){
     var ln=lines[i];
     if(!ln.trim()){out.push("");continue}
     var ps=pieces(ln),res="";
-    for(var k=0;k<ps.length;k++)res+=await trPiece(ps[k],from,to);
+    for(var k=0;k<ps.length;k++)res+=(res?sep:"")+(await trPiece(ps[k],from,to)).trim();
     out.push(res.trim());
   }
-  var r=out.join("\n");
+  return out.join("\n");
+}
+function same(a,b){return a.replace(/\s+/g,"").toLowerCase()===b.replace(/\s+/g,"").toLowerCase()}
+async function tr(text,from,to){
+  if(from===to)return text;
+  var key=from+"|"+to+"|"+text;
+  if(cache[key])return cache[key];
+  var r=await trRaw(text,from,to);
+  /* hasil sama dengan aslinya = bahasa sumber kemungkinan salah -> coba deteksi otomatis */
+  if(same(r,text)&&(text.match(/\p{L}/gu)||[]).length>=3){
+    try{var r2=await trRaw(text,"Autodetect",to);if(!same(r2,text))r=r2}catch(e){}
+  }
   cache[key]=r;
   return r;
 }
@@ -149,7 +182,7 @@ function render(){
 }
 function add(t,o,x,from,to){
   var d=new Date(),p=function(n){return (n<10?"0":"")+n};
-  hist.push({t:t,o:o,x:x,from:from,to:to,time:p(d.getHours())+":"+p(d.getMinutes())});
+  hist.push({ts:Date.now(),t:t,o:o,x:x,from:from,to:to,time:p(d.getHours())+":"+p(d.getMinutes())});
   save();render();
 }
 
@@ -161,6 +194,7 @@ function preview(){
   var txt=$("txt").value.trim();
   if(!txt){msg("");return}
   var d=dirs(),id=++seq;
+  if(mode==="recv")d=[detectSrc(txt,$("lto").value).code,$("lmy").value];
   msg("Menerjemahkan...");
   timer=setTimeout(function(){
     tr(txt,d[0],d[1]).then(function(r){if(id===seq)msg("→ "+langName(d[1])+":\n"+r)}).catch(function(e){if(id===seq)msg("Gagal menerjemahkan: "+e.message,true)});
@@ -180,6 +214,7 @@ function setMode(m){
 $("tsend").onclick=function(){setMode("send")};
 $("trecv").onclick=function(){setMode("recv")};
 $("txt").oninput=preview;
+$("txt").addEventListener("paste",function(){if(mode!=="recv")return;setTimeout(function(){if($("txt").value.trim())$("go").click()},60)});
 $("lmy").onchange=$("lto").onchange=function(){store("wa_tr_my",$("lmy").value);store("wa_tr_to",$("lto").value);preview()};
 $("num").onchange=function(){store("wa_tr_num",$("num").value)};
 $("swap").onclick=function(){var a=$("lmy").value;$("lmy").value=$("lto").value;$("lto").value=a;$("lmy").onchange()};
@@ -190,7 +225,7 @@ $("go").onclick=async function(){
   var my=$("lmy").value,to=$("lto").value;
   if(mode==="recv"){
     btn.disabled=true;msg("Menerjemahkan...");
-    try{var r=await tr(txt,to,my);add("in",txt,r,to,my);$("txt").value="";msg("")}
+    try{await incoming(txt);$("txt").value="";msg("")}
     catch(e){msg("Gagal menerjemahkan: "+e.message,true)}
     btn.disabled=false;return;
   }
@@ -219,10 +254,48 @@ $("clr").onclick=function(){
   hist=[];save();render();$("txt").value="";msg("");
 };
 
+/* ---------- deteksi bahasa balasan pelanggan (otomatis) ---------- */
+var SW={
+ id:"yang dan saya ini itu tidak untuk dengan ada mau bisa terima kasih halo berapa pesan tolong sudah belum jam dari akan atau juga ke di apa kapan tempat".split(" "),
+ en:"the and you is are to of for please thank thanks hello hi can would want how what we my it with this that have do not yes no ok order".split(" "),
+ es:"el la los las de que por para con una un hola gracias quiero favor es en está estoy muy más como si".split(" "),
+ fr:"le la les des et est je vous pour merci bonjour avec une pas nous suis très s'il plaît ça au du oui".split(" "),
+ de:"der die das und ich ist nicht ein bitte danke hallo mit für ja nein sie wir haben auch".split(" "),
+ pt:"os as não para com uma obrigado olá você por favor sim está eu muito".split(" ")
+};
+var LATIN=["id","en","es","fr","de","pt"];
+function detectSrc(t,fb){
+  var s=t||"";
+  if(/[\u0400-\u04FF]/.test(s))return{code:"ru",conf:1};
+  if(/[\u0600-\u06FF]/.test(s))return{code:"ar",conf:1};
+  if(/[\u0900-\u097F]/.test(s))return{code:"hi",conf:1};
+  if(/[\uAC00-\uD7AF]/.test(s))return{code:"ko",conf:1};
+  if(/[\u3040-\u30FF]/.test(s))return{code:"ja",conf:1};
+  if(/[\u4E00-\u9FFF]/.test(s))return{code:"zh-CN",conf:1};
+  var w=s.toLowerCase().match(/[a-zà-ÿñ']+/g)||[],sc={};
+  LATIN.forEach(function(k){sc[k]=0});
+  w.forEach(function(x){LATIN.forEach(function(k){if(SW[k].indexOf(x)>-1)sc[k]++})});
+  if(/[ñ¿¡]/.test(s))sc.es+=2;
+  if(/[ãõ]/.test(s))sc.pt+=2;
+  if(/[ßäöü]/i.test(s))sc.de+=2;
+  if(/[èêàçœ]/i.test(s))sc.fr+=1;
+  var ks=LATIN.slice().sort(function(a,b){return sc[b]-sc[a]}),b=ks[0],s2=ks[1];
+  if(sc[b]>=1&&sc[b]>sc[s2])return{code:b,conf:sc[b]>=2?1:0};
+  return{code:LATIN.indexOf(fb)>-1?fb:"en",conf:0};
+}
+async function incoming(t){
+  var my=$("lmy").value,cur=$("lto").value,d=detectSrc(t,cur),from=d.code;
+  var last=hist[hist.length-1];
+  if(last&&last.t==="in"&&last.o===t&&Date.now()-(last.ts||0)<10000)return;
+  var r=/\p{L}/u.test(t)?await tr(t,from,my):t;
+  if(d.conf&&$("follow").checked&&from!==my&&from!==cur){$("lto").value=from;store("wa_tr_to",from)}
+  add("in",t,r,from,my);
+}
+
 /* ---------- tempel otomatis balasan dari clipboard ---------- */
 var lastPaste=store("wa_tr_lastpaste")||"",pBusy=false;
 function skipClip(t){
-  return !t||t.length>1000||/^https?:\/\/\S+$/i.test(t)||(!/\s/.test(t)&&t.length>=8&&/\d/.test(t)&&/[A-Za-z]/.test(t));
+  return !t||t.length>1000||!/\p{L}/u.test(t)||/^https?:\/\/\S+$/i.test(t)||(!/\s/.test(t)&&t.length>=8&&/\d/.test(t)&&/[A-Za-z]/.test(t));
 }
 async function pasteReply(auto){
   if(pBusy)return;pBusy=true;
@@ -234,10 +307,9 @@ async function pasteReply(auto){
     if(auto&&(t===lastPaste||skipClip(t)))return;
     if(auto&&hist.some(function(h){return h.t==="out"&&(h.o===t||h.x===t)}))return;
     if(t.length>1000)t=t.slice(0,1000);
-    var my=$("lmy").value,to=$("lto").value;
     msg("Menempel & menerjemahkan...");
     lastPaste=t;store("wa_tr_lastpaste",t);
-    try{var r=await tr(t,to,my);add("in",t,r,to,my);msg("")}
+    try{await incoming(t);msg("")}
     catch(e){lastPaste="";store("wa_tr_lastpaste","");msg("Gagal menerjemahkan: "+e.message,true)}
   }finally{pBusy=false}
 }
@@ -247,6 +319,8 @@ window.addEventListener("focus",onBack);
 $("pst").onclick=function(){pasteReply(false)};
 $("autop").checked=store("wa_tr_autop")!=="0";
 $("autop").onchange=function(){store("wa_tr_autop",this.checked?"1":"0")};
+$("follow").checked=store("wa_tr_follow")!=="0";
+$("follow").onchange=function(){store("wa_tr_follow",this.checked?"1":"0")};
 
 /* ---------- mulai ---------- */
 (function(){
