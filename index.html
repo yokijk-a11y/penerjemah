@@ -322,6 +322,21 @@ $("autop").onchange=function(){store("wa_tr_autop",this.checked?"1":"0")};
 $("follow").checked=store("wa_tr_follow")!=="0";
 $("follow").onchange=function(){store("wa_tr_follow",this.checked?"1":"0")};
 
+/* ---------- perbaiki balasan lama yang belum diterjemahkan ---------- */
+async function fixOld(){
+  var my=$("lmy").value;
+  for(var i=0;i<hist.length;i++){
+    var h=hist[i];
+    if(h.t!=="in"||!/\p{L}/u.test(h.o)||!same(h.x,h.o))continue;
+    var d=detectSrc(h.o,h.from);
+    if(d.code===my)continue;
+    try{
+      var r=await tr(h.o,d.code,my);
+      if(!same(r,h.o)){h.x=r;h.from=d.code;h.to=my;save();render()}
+    }catch(e){break}
+  }
+}
+
 /* ---------- mulai ---------- */
 (function(){
   LANGS.forEach(function(l){
@@ -332,6 +347,7 @@ $("follow").onchange=function(){store("wa_tr_follow",this.checked?"1":"0")};
   $("num").value=store("wa_tr_num")||"";
   try{hist=JSON.parse(store("wa_tr_hist")||"[]")||[]}catch(e){hist=[]}
   render();setMode("send");
+  fixOld();
 })();
 </script>
 </body>
